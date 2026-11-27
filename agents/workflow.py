@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from agents.requirement_extraction import extract_requirements
+from agents.sdlc_selector import select_sdlc
 from config import ARTIFACT_PATH, DATABASE_PATH, KB_PATH
 from exporters.markdown import build_artifacts, persist_artifacts
 from rag.retriever import retrieve_evidence
@@ -171,42 +172,7 @@ def _merge_governance(state: WorkflowState) -> dict[str, Any]:
 
 
 def _select_sdlc(state: WorkflowState) -> dict[str, Any]:
-    requirements = state.get("requirements", [])
-    high_risk = sum(item.get("risk_level") == "High" for item in requirements)
-    unstable = sum(bool(item.get("ambiguity_flags")) for item in requirements)
-    if high_risk >= max(2, len(requirements) // 2):
-        ranked = [("V-Model", 0.88), ("Incremental", 0.78), ("Agile", 0.64), ("Spiral", 0.62)]
-        rationale = "The requirement set has significant control or failure impact; explicit verification and evidence gates are prioritized."
-    elif unstable:
-        ranked = [("Spiral", 0.84), ("Agile", 0.80), ("Incremental", 0.74), ("V-Model", 0.62)]
-        rationale = "Unresolved ambiguity favors iterative risk discovery and stakeholder feedback before baselining."
-    else:
-        ranked = [("Agile", 0.84), ("Incremental", 0.79), ("V-Model", 0.72), ("Spiral", 0.65)]
-        rationale = "The current inputs support iterative delivery; retain formal control and acceptance checkpoints."
-    ranked.sort(key=lambda item: (-item[1], item[0]))
-    preferred = state.get("sdlc_focus")
-    if preferred not in {None, "Agile", "V-Model", "Spiral", "Incremental"}:
-        raise ValueError(f"Unsupported SDLC preset focus: {preferred!r}")
-    if preferred:
-        rationale += (
-            f" The selected starter case is tailored to {preferred}; "
-            "the ranking remains based on the extracted requirements."
-        )
-    return {
-        "sdlc_recommendation": {
-            "recommended": ranked[0][0],
-            "confidence": ranked[0][1],
-            "rationale": rationale,
-            "preset_focus": preferred,
-            "ranking": [{"model": name, "score": score} for name, score in ranked],
-            "gates": [
-                "Requirements baseline and named business owner",
-                "Security, privacy, and compliance design review",
-                "Test evidence and traceability review",
-                "Operational readiness and accountable release approval",
-            ],
-        }
-    }
+    return {"sdlc_recommendation": select_sdlc(state)}
 
 
 def _documentation(state: WorkflowState) -> dict[str, Any]:

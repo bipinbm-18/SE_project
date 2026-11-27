@@ -29,7 +29,7 @@ By default, the app uses offline mock extraction and makes no model calls. To en
 ```dotenv
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=your-key
-LLM_MODEL=gemini-2.5-flash
+LLM_MODEL=gemini-3.8-flash
 ```
 
 Never commit `.env` or paste an API key into source code. The app warns that source material is sent to Google Gemini when Gemini mode is selected; do not send confidential or personal data unless approved by your organization. Use `LLM_PROVIDER=mock` for offline analysis.

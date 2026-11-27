@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agents.sdlc_selector import REQUIRED_APPROVAL_ROLES
+
 
 class SQLiteManager:
     def __init__(self, path: Path | str):
@@ -56,6 +58,7 @@ class SQLiteManager:
                     approval_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
                     approver TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'General Reviewer',
                     decision TEXT NOT NULL,
                     notes TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
@@ -75,6 +78,13 @@ class SQLiteManager:
             if "analysis_json" not in project_columns:
                 connection.execute(
                     "ALTER TABLE projects ADD COLUMN analysis_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            approval_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(approvals)")
+            }
+            if "role" not in approval_columns:
+                connection.execute(
+                    "ALTER TABLE approvals ADD COLUMN role TEXT NOT NULL DEFAULT 'General Reviewer'"
                 )
 
     @staticmethod
@@ -164,22 +174,64 @@ class SQLiteManager:
                 ),
             )
 
+    @staticmethod
+    def summarize_signoffs(approvals: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+        summary = {
+            role: {"status": "pending", "approver": "", "notes": "", "created_at": ""}
+            for role in REQUIRED_APPROVAL_ROLES
+        }
+        # Approvals are ordered newest-first; keep the latest decision per required role.
+        for item in approvals:
+            role = item.get("role")
+            if role in summary and summary[role]["status"] == "pending":
+                summary[role] = {
+                    "status": item.get("decision", "pending"),
+                    "approver": item.get("approver", ""),
+                    "notes": item.get("notes", ""),
+                    "created_at": item.get("created_at", ""),
+                }
+        return summary
+
     def record_approval(
-        self, project_id: str, approver: str, decision: str, notes: str = ""
-    ) -> None:
+        self,
+        project_id: str,
+        approver: str,
+        decision: str,
+        notes: str = "",
+        role: str = "General Reviewer",
+    ) -> str:
         if decision not in {"approved", "rejected", "changes_requested"}:
             raise ValueError(f"Invalid approval decision: {decision}")
         if not approver.strip():
             raise ValueError("Approver name is required.")
+        clean_role = role.strip() or "General Reviewer"
         now = self._now()
         with self.connect() as connection:
             connection.execute(
-                """INSERT INTO approvals(project_id, approver, decision, notes, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (project_id, approver.strip(), decision, notes.strip(), now),
+                """INSERT INTO approvals(project_id, approver, role, decision, notes, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (project_id, approver.strip(), clean_role, decision, notes.strip(), now),
             )
+            if clean_role in REQUIRED_APPROVAL_ROLES:
+                rows = connection.execute(
+                    "SELECT approver, role, decision, notes, created_at FROM approvals "
+                    "WHERE project_id = ? ORDER BY approval_id DESC",
+                    (project_id,),
+                ).fetchall()
+                summary = self.summarize_signoffs([dict(item) for item in rows])
+                statuses = [entry["status"] for entry in summary.values()]
+                if "rejected" in statuses:
+                    project_status = "rejected"
+                elif "changes_requested" in statuses:
+                    project_status = "changes_requested"
+                elif all(state == "approved" for state in statuses):
+                    project_status = "approved"
+                else:
+                    project_status = "pending_stakeholder_signoff"
+            else:
+                project_status = decision
             connection.execute(
-                "UPDATE projects SET status = ? WHERE project_id = ?", (decision, project_id)
+                "UPDATE projects SET status = ? WHERE project_id = ?", (project_status, project_id)
             )
             connection.execute(
                 """INSERT INTO audit_events(project_id, event_type, details_json, created_at)
@@ -187,10 +239,13 @@ class SQLiteManager:
                 (
                     project_id,
                     "human_decision",
-                    json.dumps({"approver": approver.strip(), "decision": decision}),
+                    json.dumps(
+                        {"approver": approver.strip(), "role": clean_role, "decision": decision}
+                    ),
                     now,
                 ),
             )
+        return project_status
 
     def list_projects(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -226,11 +281,12 @@ class SQLiteManager:
             project["approvals"] = [
                 dict(item)
                 for item in connection.execute(
-                    "SELECT approver, decision, notes, created_at FROM approvals "
+                    "SELECT approver, role, decision, notes, created_at FROM approvals "
                     "WHERE project_id = ? ORDER BY approval_id DESC",
                     (project_id,),
                 ).fetchall()
             ]
+            project["signoff_summary"] = self.summarize_signoffs(project["approvals"])
             project["audit_events"] = [
                 dict(item)
                 for item in connection.execute(

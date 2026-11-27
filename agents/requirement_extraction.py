@@ -5,8 +5,14 @@ import json
 import re
 from typing import Any
 
-from config import GEMINI_API_KEY, LLM_MODEL
+from config import GEMINI_API_KEY, LLM_MODEL, read_env_value
 from schemas.models import ExtractedRequirements, Requirement
+
+FALLBACK_GEMINI_MODELS = (
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+)
 
 VAGUE_TERMS = (
     "quickly",
@@ -22,20 +28,38 @@ VAGUE_TERMS = (
 )
 
 
-def _gemini_json(prompt: str) -> Any:
+def call_gemini_json(prompt: str) -> Any:
     if not GEMINI_API_KEY:
         raise RuntimeError(
             "LLM_PROVIDER is gemini, but GEMINI_API_KEY (or GOOGLE_API_KEY) is not set."
         )
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    model = ChatGoogleGenerativeAI(
-        model=LLM_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        temperature=0,
-    )
-    response = model.invoke(prompt)
-    content = response.content
+    configured_model = read_env_value("LLM_MODEL", LLM_MODEL) or LLM_MODEL
+    candidates = [configured_model] + [
+        model_name for model_name in FALLBACK_GEMINI_MODELS if model_name != configured_model
+    ]
+    last_error: Exception | None = None
+    content: Any = None
+    for candidate in candidates:
+        try:
+            model = ChatGoogleGenerativeAI(
+                model=candidate,
+                google_api_key=GEMINI_API_KEY,
+                temperature=0,
+                max_retries=1,
+                timeout=20,
+            )
+            response = model.invoke(prompt)
+            content = response.content
+            break
+        except Exception as exc:
+            last_error = exc
+            continue
+    else:
+        assert last_error is not None
+        raise last_error
+
     if isinstance(content, list):
         content = "\n".join(
             part.get("text", "") if isinstance(part, dict) else str(part)
@@ -46,7 +70,11 @@ def _gemini_json(prompt: str) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("Gemini returned invalid JSON for requirement extraction.") from exc
+        raise ValueError("Gemini returned invalid JSON.") from exc
+
+
+def _gemini_json(prompt: str) -> Any:
+    return call_gemini_json(prompt)
 
 
 def _mock_extract(source_text: str) -> list[Requirement]:

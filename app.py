@@ -9,8 +9,9 @@ from pathlib import Path
 import streamlit as st
 from docx import Document
 
+from agents.sdlc_selector import REQUIRED_APPROVAL_ROLES
 from agents.workflow import run_workflow
-from config import DATABASE_PATH, LLM_PROVIDER, GEMINI_API_KEY
+from config import DATABASE_PATH, GEMINI_API_KEY, LLM_MODEL, LLM_PROVIDER, read_env_value
 from database.sqlite_manager import SQLiteManager
 from sample_inputs.presets import PRESETS
 
@@ -19,13 +20,33 @@ st.set_page_config(page_title="FinSpec AI", page_icon="◈", layout="wide")
 st.markdown(
     """
     <style>
-    .stApp { background: #f5f7fb; }
-    [data-testid="stSidebar"] { background: #101b31; }
-    [data-testid="stSidebar"] * { color: #e8eefb; }
+    .stApp { background: #f5f7fb; color: #162238; }
+    [data-testid="stMain"] [data-testid="stCaptionContainer"],
+    [data-testid="stMain"] [data-testid="stCaptionContainer"] p { color: #334155; }
+    [data-testid="stSidebar"] { background: #101b31; color: #e8eefb; }
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label p { color: #e8eefb; }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color: #cbd5e1; }
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea,
+    [data-testid="stSidebar"] [data-baseweb="select"] div,
+    [data-testid="stSidebar"] [data-baseweb="select"] span,
+    [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] span,
+    [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] small,
+    [data-testid="stSidebar"] button[kind="secondary"],
+    [data-testid="stSidebar"] button[kind="secondary"] p,
+    [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"],
+    [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"] p { color: #162238; }
     .hero { padding: 1.4rem 1.6rem; border-radius: 16px; color: white;
       background: linear-gradient(115deg, #10213d, #175b72); margin-bottom: 1rem; }
     .hero h1 { margin: 0; font-size: 2rem; }
-    .hero p { margin: .45rem 0 0 0; color: #d3e6ee; }
+    .hero p { margin: .45rem 0 0 0; color: #eef6fa; }
     .notice { padding: .8rem 1rem; border-left: 4px solid #d59a28;
       background: #fff5dc; border-radius: 4px; color: #3a3425; }
     </style>
@@ -118,8 +139,9 @@ st.markdown(
 )
 
 if LLM_PROVIDER == "gemini" and GEMINI_API_KEY:
+    active_model = read_env_value("LLM_MODEL", LLM_MODEL) or LLM_MODEL
     st.warning(
-        "Gemini mode is configured. Source text submitted for analysis will be sent to Google "
+        f"Gemini mode is configured ({active_model}). Source text submitted for analysis will be sent to Google "
         "Gemini. Do not upload secrets or personal/customer data unless permitted by your "
         "organization's data handling policy."
     )
@@ -216,6 +238,7 @@ if run_clicked:
         )
         result.update(project_record)
         result["approvals"] = []
+        result["signoff_summary"] = manager.summarize_signoffs([])
         result["audit_events"] = []
         st.session_state["active_project"] = result
         st.rerun()
@@ -283,18 +306,62 @@ if active:
                 f"This case is tailored to **{recommendation['preset_focus']}**. "
                 "The recommendation below is still computed from the requirements."
             )
-        st.subheader(recommendation.get("recommended", "Not available"))
+        if recommendation.get("llm_fallback_note"):
+            st.warning(recommendation["llm_fallback_note"])
+        pct = recommendation.get("percentage")
+        score_text = f"{pct}%" if pct is not None else recommendation.get("confidence", "N/A")
+        st.subheader(f"{recommendation.get('recommended', 'Not available')} ({score_text})")
         st.write(recommendation.get("rationale", ""))
         st.caption(
-            f"Heuristic screening score: {recommendation.get('confidence', 'N/A')} "
-            "— not a statistical confidence."
+            f"Hybrid MCDA screening score: {recommendation.get('confidence', 'N/A')} ({score_text}) "
+            f"| Rationale source: {recommendation.get('rationale_source', 'deterministic')}"
         )
         ranking = recommendation.get("ranking", [])
         if ranking:
+            st.markdown("#### MCDA candidate ranking")
             st.dataframe(ranking, use_container_width=True, hide_index=True)
-        st.markdown("**Suggested governance gates**")
-        for gate in recommendation.get("gates", []):
-            st.markdown(f"- {gate}")
+        factors = recommendation.get("decision_factors", [])
+        if factors:
+            with st.expander("13 SDLC decision factors", expanded=False):
+                st.dataframe(
+                    [
+                        {
+                            "Factor": item["name"],
+                            "Score": f"{item.get('percentage', round(item.get('score', 0) * 100))}%",
+                            "Level": item.get("level", ""),
+                            "Evidence": item.get("evidence", ""),
+                        }
+                        for item in factors
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        custom_workflow = recommendation.get("custom_workflow", [])
+        if custom_workflow:
+            st.markdown("#### Project-specific SDLC workflow")
+            for phase in custom_workflow:
+                with st.expander(phase["phase"], expanded=False):
+                    st.markdown(f"**Responsible roles:** {', '.join(phase.get('responsible_roles', []))}")
+                    st.markdown(f"**Deliverables:** {', '.join(phase.get('deliverables', []))}")
+                    st.markdown(f"**Human approval gate:** {phase.get('human_approval_gate', '')}")
+                    st.markdown(f"**Traceability:** {phase.get('traceability_requirements', '')}")
+                    for heading, key in (
+                        ("Activities", "activities"),
+                        ("Security activities", "security_activities"),
+                        ("Testing requirements", "testing_requirements"),
+                        ("Compliance checkpoints", "compliance_checkpoints"),
+                        ("Entry criteria", "entry_criteria"),
+                        ("Exit criteria", "exit_criteria"),
+                    ):
+                        entries = phase.get(key, [])
+                        if entries:
+                            st.markdown(f"**{heading}**")
+                            for entry in entries:
+                                st.markdown(f"- {entry}")
+        else:
+            st.markdown("**Suggested governance gates**")
+            for gate in recommendation.get("gates", []):
+                st.markdown(f"- {gate}")
     with tabs[3]:
         artifacts = active.get("artifacts", {})
         if artifacts:
@@ -318,12 +385,24 @@ if active:
         else:
             st.info("Load a project generated by this version to view its deliverables.")
     with tabs[4]:
-        st.markdown("### Named human decision")
+        st.markdown("### Multi-stakeholder approval gate")
         st.caption(
-            "Approval records are durable. A decision does not certify regulatory compliance "
-            "or replace required institutional sign-off."
+            "Finalizing the SDLC selection requires sign-off from Project Manager, Architect, "
+            "Security Team, and Compliance Officer. Records are durable and do not replace "
+            "formal institutional sign-off."
         )
+        approvals = active.get("approvals", [])
+        signoff_summary = active.get("signoff_summary") or manager.summarize_signoffs(approvals)
+        signoff_cols = st.columns(len(REQUIRED_APPROVAL_ROLES))
+        for col, role_name in zip(signoff_cols, REQUIRED_APPROVAL_ROLES):
+            role_info = signoff_summary.get(role_name, {"status": "pending"})
+            col.metric(
+                role_name,
+                role_info["status"].replace("_", " ").title(),
+                delta=role_info.get("approver") or None,
+            )
         with st.form(f"approval-{active['project_id']}"):
+            role = st.selectbox("Stakeholder role", list(REQUIRED_APPROVAL_ROLES))
             approver = st.text_input("Approver name")
             decision = st.selectbox(
                 "Decision",
@@ -333,20 +412,30 @@ if active:
             notes = st.text_area("Decision notes")
             submitted = st.form_submit_button("Record decision")
         if submitted:
-            manager.record_approval(active["project_id"], approver, decision, notes)
-            active["status"] = decision
-            active.setdefault("approvals", []).insert(
-                0,
-                {
-                    "approver": approver,
-                    "decision": decision,
-                    "notes": notes,
-                    "created_at": "",
-                },
-            )
-            st.session_state["active_project"] = active
-            st.success(f"Decision recorded: {decision.replace('_', ' ')}.")
-        approvals = active.get("approvals", [])
+            if not approver.strip():
+                st.error("Enter an approver name before recording a decision.")
+            else:
+                new_status = manager.record_approval(
+                    active["project_id"], approver, decision, notes, role=role
+                )
+                active["status"] = new_status
+                active.setdefault("approvals", []).insert(
+                    0,
+                    {
+                        "approver": approver.strip(),
+                        "role": role,
+                        "decision": decision,
+                        "notes": notes.strip(),
+                        "created_at": "",
+                    },
+                )
+                active["signoff_summary"] = manager.summarize_signoffs(active["approvals"])
+                st.session_state["active_project"] = active
+                st.success(
+                    f"Recorded {decision.replace('_', ' ')} for {role}. "
+                    f"Project status: {new_status.replace('_', ' ').title()}."
+                )
+                st.rerun()
         if approvals:
             st.markdown("### Decision history")
             st.dataframe(approvals, use_container_width=True, hide_index=True)

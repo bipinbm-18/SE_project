@@ -12,6 +12,60 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def _render_sdlc_plan(sdlc: dict[str, Any]) -> str:
+    lines = [
+        "# SDLC recommendation",
+        "",
+        f"**Recommended approach:** {sdlc.get('recommended', 'Needs review')}  ",
+        f"**Screening score:** {sdlc.get('confidence', 'N/A')} ({sdlc.get('percentage', 'N/A')}%)  ",
+        f"**Rationale source:** {sdlc.get('rationale_source', 'deterministic')}",
+        "",
+    ]
+    if sdlc.get("preset_focus"):
+        lines.extend([f"**Starter-case focus:** {sdlc['preset_focus']} (does not force the recommendation)", ""])
+    if sdlc.get("rationale"):
+        lines.extend([sdlc["rationale"], ""])
+    factors = sdlc.get("decision_factors", [])
+    if factors:
+        factor_rows = [
+            [item["name"], f"{item.get('percentage', round(item.get('score', 0) * 100))}%", item.get("level", ""), item.get("evidence", "")]
+            for item in factors
+        ]
+        lines.extend(["## 13 Decision Factors", "", _table(["Factor", "Score", "Level", "Observed evidence"], factor_rows), ""])
+    ranking = sdlc.get("ranking", [])
+    if ranking:
+        rank_rows = [
+            [item["model"], f"{item.get('percentage', round(item.get('score', 0) * 100))}%", str(item.get("score", ""))]
+            for item in ranking
+        ]
+        lines.extend(["## MCDA Candidate Ranking", "", _table(["SDLC Model", "Suitability", "Score"], rank_rows), ""])
+    workflow_phases = sdlc.get("custom_workflow", [])
+    if workflow_phases:
+        lines.extend(["## Project-Specific SDLC Workflow", ""])
+        for phase in workflow_phases:
+            lines.append(f"### {phase['phase']}")
+            lines.append("")
+            lines.append(f"- **Responsible roles:** {', '.join(phase.get('responsible_roles', [])) or 'TBD'}")
+            lines.append(f"- **Deliverables:** {', '.join(phase.get('deliverables', [])) or 'TBD'}")
+            lines.append(f"- **Activities:** {'; '.join(phase.get('activities', [])) or 'TBD'}")
+            lines.append(f"- **Security activities:** {'; '.join(phase.get('security_activities', [])) or 'TBD'}")
+            lines.append(f"- **Testing requirements:** {'; '.join(phase.get('testing_requirements', [])) or 'TBD'}")
+            lines.append(f"- **Compliance checkpoints:** {'; '.join(phase.get('compliance_checkpoints', [])) or 'TBD'}")
+            lines.append(f"- **Entry criteria:** {'; '.join(phase.get('entry_criteria', [])) or 'TBD'}")
+            lines.append(f"- **Exit criteria:** {'; '.join(phase.get('exit_criteria', [])) or 'TBD'}")
+            lines.append(f"- **Human approval gate:** {phase.get('human_approval_gate', 'Required')}")
+            lines.append(f"- **Traceability:** {phase.get('traceability_requirements', 'Required')}")
+            lines.append("")
+    lines.extend(["## Suggested gates", ""])
+    lines.extend(f"- {gate}" for gate in sdlc.get("gates", []))
+    required_approvers = sdlc.get("required_approvers", [])
+    if required_approvers:
+        lines.extend(["", "## Required Multi-Stakeholder Sign-off", ""])
+        lines.extend(f"- {role}" for role in required_approvers)
+    lines.extend(["", "Scores are heuristic decision support. Project leadership should select and tailor the lifecycle."])
+    return "\n".join(lines)
+
+
 def build_artifacts(state: dict[str, Any]) -> dict[str, str]:
     requirements = state.get("requirements", [])
     project = state.get("project_name", "FinSpec project")
@@ -80,17 +134,7 @@ def build_artifacts(state: dict[str, Any]) -> dict[str, str]:
         "risk_register.md": "# Risk register\n\n"
         + (_table(["Requirement", "Initial risk", "Risk note"], risk_rows) if risk_rows else "No requirements extracted.")
         + "\n\nRisk levels are preliminary screening indicators, not a quantitative assessment.\n",
-        "sdlc_plan.md": f"# SDLC recommendation\n\n"
-        f"**Recommended approach:** {sdlc.get('recommended', 'Needs review')}  \n"
-        f"**Screening score:** {sdlc.get('confidence', 'N/A')}\n\n"
-        + (
-            f"**Starter-case focus:** {sdlc['preset_focus']} (does not force the recommendation)\n\n"
-            if sdlc.get("preset_focus")
-            else ""
-        )
-        + f"{sdlc.get('rationale', '')}\n\n## Suggested gates\n\n"
-        + "\n".join(f"- {gate}" for gate in sdlc.get("gates", []))
-        + "\n\nScores are heuristic decision support. Project leadership should select and tailor the lifecycle.\n",
+        "sdlc_plan.md": _render_sdlc_plan(sdlc),
         "open_issues.md": "# Open issues\n\n"
         + ("\n".join(f"- {issue}" for issue in issues) if issues else "- No automated validation issues were detected.")
         + ("\n\n## Potential conflicts\n\n" + "\n".join(
